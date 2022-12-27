@@ -21,26 +21,13 @@ Here is a valid `WORKLOAD`:
     "workload_id": "sevtest",
     "tee_config": "{\"flags\":{\"bits\":63},\"minfw\":{\"major\":0,\"minor\":0}}",
     "passphrase": "mysecretpassphrase",
-    "launch_measurement": "3c6f91219614a28d2e193e82dc2366d1a758a52c04607999b5b8ff9216304c97"
+    "launch_measurement": "3c6f91219614a28d2e193e82dc2366d1a758a52c04607999b5b8ff9216304c97",
+    "affinity": ["CEK EP384 E256 230f44f6705d3a0ab10edeac5aff6706713beaf3bec433d9d097b5f4c12cf5e3"]
 }
 ```
 
 The `passphrase` is the LUKS2 passphrase to your encrypted disk image. 
 Obviously you need to keep your WORKLOAD secret :).
 
-### WORKLOAD Theft
-
-If your TEE host gets hacked, and the following resouces get pinched:
-
-1. Your LUKS2 encrypted disk image
-2. Your `workload_id`
-3. Your `libkrunfw-sev.so`
-
-It is possible to for the hacker to start your workload on a different AMD SEV/SNP CPUs too if
-your Attestation Server is open. 
-
-A simple mitigation is too only allow remote attestation requests from the a specific IP.
-
-In the future, I'm planning to pin each WORKLOAD to a Chip Endorsement Key (CEK) so that it 
-cannot be moved to a different AMD SEV/SNP CPU without updating the WORKLOAD at the
-Attestation Server.
+The `affinity` array contains CEKs (Chip Endorsement Keys) thar are
+allowed to execute the remote attestation protocol. When empty all CEKs are allowed.

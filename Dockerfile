@@ -19,7 +19,4 @@ LABEL org.opencontainers.image.source=https://github.com/blenessy/reference-kbs 
 
 COPY --from=build-env /build/Rocket.toml /build/target/release/reference-kbs /
 
-# NOTE: this needs to be changed and kept secret.
-ENV WORKLOAD='{"workload_id":"sevtest","tee_config":"{\"flags\":{\"bits\":63},\"minfw\":{\"major\":0,\"minor\":0}}","passphrase":"mysecretpassphrase","launch_measurement":"3c6f91219614a28d2e193e82dc2366d1a758a52c04607999b5b8ff9216304c97"}'
-
 CMD ["/reference-kbs"]

@@ -41,6 +41,7 @@ struct Workload {
     launch_measurement: String,
     tee_config: String,
     passphrase: String,
+    affinity: Vec<String>,
 }
 
 #[get("/")]
@@ -71,6 +72,11 @@ async fn auth(
             let workload = get_workload();
             if sev_request.workload_id != workload.workload_id {
                 return Err(BadRequest(Some("Invalid workload".to_string())));
+            }
+
+            let cek = sev_request.chain.sev.cek.to_string();
+            if workload.affinity.len() > 0 && workload.affinity.iter().position(|s| *s == cek).is_none() {
+                return Err(BadRequest(Some("Wrong CEC".to_string())));
             }
 
             Box::new(SevAttester::new(
