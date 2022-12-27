@@ -5,12 +5,11 @@ use std::sync::{Arc, Mutex, RwLock};
 
 #[macro_use]
 extern crate rocket;
-use rocket::fairing::AdHoc;
 use rocket::http::{Cookie, CookieJar};
 use rocket::response::status::{BadRequest, Unauthorized};
 use rocket::serde::json::{json, Json, Value};
 use rocket::serde::{Deserialize, Serialize};
-use rocket::{Build, Rocket, State};
+use rocket::{State};
 
 use kbs_types::{Attestation, Request, SevRequest, Tee};
 use uuid::Uuid;
@@ -19,63 +18,21 @@ use reference_kbs::attester::Attester;
 use reference_kbs::sev::SevAttester;
 use reference_kbs::{Session, SessionState};
 
-use rocket_sync_db_pools::database;
+use std::env;
 
-#[macro_use]
-extern crate diesel;
-#[macro_use]
-extern crate diesel_migrations;
-
-use diesel::prelude::*;
-use diesel_migrations::embed_migrations;
-
-#[derive(Debug, Clone, Deserialize, Serialize, Queryable, Insertable)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(crate = "rocket::serde")]
-#[table_name = "configs"]
-struct TeeConfig {
-    workload_id: String,
-    tee_config: String,
-}
-
-table! {
-    configs (workload_id) {
-        workload_id -> Text,
-        tee_config -> Text,
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Queryable, Insertable)]
-#[serde(crate = "rocket::serde")]
-#[table_name = "measurements"]
 struct Measurement {
     workload_id: String,
     launch_measurement: String,
 }
 
-table! {
-    measurements (workload_id) {
-        workload_id -> Text,
-        launch_measurement -> Text,
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Queryable, Insertable)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(crate = "rocket::serde")]
-#[table_name = "secrets"]
 struct Secret {
     key_id: String,
     secret: String,
 }
-
-table! {
-    secrets (key_id) {
-        key_id -> Text,
-        secret -> Text,
-    }
-}
-
-#[database("diesel")]
-struct Db(diesel::SqliteConnection);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(crate = "rocket::serde")]
@@ -92,9 +49,14 @@ fn index() -> Result<String, Unauthorized<String>> {
     Err(Unauthorized(None))
 }
 
+fn get_workload() -> Workload {
+    let json = env::var("WORKLOAD").expect("WORKLOAD environment variable not defined");
+    let object: Workload = serde_json::from_str(&json).expect("WORKLOAD is not a valid JSON");
+    return object;
+}
+
 #[post("/auth", format = "application/json", data = "<request>")]
 async fn auth(
-    db: Db,
     state: &State<SessionState>,
     cookies: &CookieJar<'_>,
     request: Json<Request>,
@@ -106,25 +68,17 @@ async fn auth(
             let sev_request: SevRequest = serde_json::from_str(&request.extra_params)
                 .map_err(|e| BadRequest(Some(e.to_string())))?;
 
-            let workload_id = sev_request.workload_id.clone();
-            let tee_config: Option<String> = match db
-                .run(move |conn| {
-                    configs::table
-                        .filter(configs::workload_id.eq(workload_id))
-                        .first::<TeeConfig>(conn)
-                })
-                .await
-            {
-                Ok(e) => Some(e.tee_config),
-                Err(_) => None,
-            };
+            let workload = get_workload();
+            if sev_request.workload_id != workload.workload_id {
+                return Err(BadRequest(Some("Invalid workload".to_string())));
+            }
 
             Box::new(SevAttester::new(
                 sev_request.workload_id.clone(),
                 session_id.clone(),
                 sev_request.build,
                 sev_request.chain,
-                tee_config,
+                Some(workload.tee_config),
             )) as Box<dyn Attester>
         }
         _ => return Err(BadRequest(Some("Unsupported TEE".to_string()))),
@@ -145,50 +99,8 @@ async fn auth(
     Ok(json!(challenge))
 }
 
-#[post("/register_workload", format = "application/json", data = "<workload>")]
-async fn register_workload(db: Db, workload: Json<Workload>) -> Result<(), BadRequest<String>> {
-    let measurement = Measurement {
-        workload_id: workload.workload_id.clone(),
-        launch_measurement: workload.launch_measurement.clone(),
-    };
-    db.run(move |conn| {
-        diesel::replace_into(measurements::table)
-            .values(&measurement)
-            .execute(conn)
-    })
-    .await
-    .map_err(|e| BadRequest(Some(e.to_string())))?;
-
-    let tee_config = TeeConfig {
-        workload_id: workload.workload_id.clone(),
-        tee_config: workload.tee_config.clone(),
-    };
-    db.run(move |conn| {
-        diesel::replace_into(configs::table)
-            .values(&tee_config)
-            .execute(conn)
-    })
-    .await
-    .map_err(|e| BadRequest(Some(e.to_string())))?;
-
-    let secret = Secret {
-        key_id: workload.workload_id.clone(),
-        secret: workload.passphrase.clone(),
-    };
-    db.run(move |conn| {
-        diesel::replace_into(secrets::table)
-            .values(&secret)
-            .execute(conn)
-    })
-    .await
-    .map_err(|e| BadRequest(Some(e.to_string())))?;
-
-    Ok(())
-}
-
 #[post("/attest", format = "application/json", data = "<attestation>")]
 async fn attest(
-    db: Db,
     state: &State<SessionState>,
     cookies: &CookieJar<'_>,
     attestation: Json<Attestation>,
@@ -205,21 +117,13 @@ async fn attest(
         None => return Err(BadRequest(Some("Invalid cookie".to_string()))),
     };
 
-    let workload_id = session_lock.lock().unwrap().workload_id();
-
-    let measurement_entry: Measurement = db
-        .run(move |conn| {
-            measurements::table
-                .filter(measurements::workload_id.eq(workload_id))
-                .first(conn)
-        })
-        .await
-        .map_err(|e| BadRequest(Some(e.to_string())))?;
+    let workload = get_workload();
+    assert_eq!(session_lock.lock().unwrap().workload_id(), workload.workload_id);
 
     let mut session = session_lock.lock().unwrap();
     session
         .attester()
-        .attest(&attestation, &measurement_entry.launch_measurement)
+        .attest(&attestation, &workload.launch_measurement)
         .map_err(|e| BadRequest(Some(e.to_string())))?;
     session.approve();
 
@@ -228,7 +132,6 @@ async fn attest(
 
 #[get("/key/<key_id>")]
 async fn key(
-    db: Db,
     state: &State<SessionState>,
     cookies: &CookieJar<'_>,
     key_id: &str,
@@ -249,48 +152,29 @@ async fn key(
         return Err(Unauthorized(Some("Invalid session".to_string())));
     }
 
-    let owned_key_id = key_id.to_string();
-    let secrets_entry: Secret = db
-        .run(move |conn| {
-            secrets::table
-                .filter(secrets::key_id.eq(owned_key_id))
-                .first(conn)
-        })
-        .await
-        .map_err(|e| Unauthorized(Some(e.to_string())))?;
-
+    let workload = get_workload();
+    assert_eq!(session_lock.lock().unwrap().workload_id(), workload.workload_id);
+    if key_id.to_string() != workload.workload_id {
+        return Err(Unauthorized(Some("Invalid key".to_string())));
+    }
+    
     let mut session = session_lock.lock().unwrap();
     let secret = session
         .attester()
-        .encrypt_secret(secrets_entry.secret.as_bytes())
+        .encrypt_secret(workload.passphrase.as_bytes())
         .unwrap();
     Ok(secret)
 }
 
-async fn run_migrations(rocket: Rocket<Build>) -> Rocket<Build> {
-    // This macro from `diesel_migrations` defines an `embedded_migrations`
-    // module containing a function named `run` that runs the migrations in the
-    // specified directory, initializing the database.
-    embed_migrations!("db/diesel/migrations");
-
-    let conn = Db::get_one(&rocket).await.expect("database connection");
-    conn.run(|c| embedded_migrations::run(c))
-        .await
-        .expect("diesel migrations");
-
-    rocket
-}
-
 #[launch]
 fn rocket() -> _ {
+    get_workload(); // will panic if the WORKLOAD environment variable is not defined
     rocket::build()
         .mount(
             "/kbs/v0",
-            routes![index, auth, attest, key, register_workload],
+            routes![index, auth, attest, key],
         )
         .manage(SessionState {
             sessions: RwLock::new(HashMap::new()),
         })
-        .attach(Db::fairing())
-        .attach(AdHoc::on_ignite("Diesel Migrations", run_migrations))
 }
